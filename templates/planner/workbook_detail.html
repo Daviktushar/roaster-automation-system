@@ -7,8 +7,8 @@
   <a class="btn btn-outline-secondary" href="{% url 'dashboard' %}">← Dashboard</a>
 </div>
 <div class="preview-banner"><span class="banner-icon">i</span><span><strong>Source preserved</strong> · Your uploaded workbook remains unchanged.</span></div>
-{% if latest_run %}
-<section class="panel"><div class="panel-title"><div><h2>Next-month roster generated automatically</h2><p>{{ latest_run.target_month|date:'F Y' }} · {{ latest_run.categories|join:', ' }}</p></div><span class="status-tag status-ready">{{ latest_run.validation_status }}</span></div><div class="d-flex gap-2"><a class="btn btn-primary" href="{% url 'run_detail' latest_run.id %}">View generated roster</a>{% if latest_downloadable %}<a class="btn btn-outline-primary" href="{% url 'download_run' latest_run.id %}">Download Excel</a>{% endif %}</div></section>
+{% if generated_runs %}
+{% for generated_run in generated_runs %}<section class="panel"><div class="panel-title"><div><h2>Next-month roster generated automatically</h2><p>{{ generated_run.target_month|date:'F Y' }} · {{ generated_run.categories|join:', ' }}</p></div><span class="status-tag status-ready">{{ generated_run.validation_status }}</span></div><div class="d-flex gap-2"><a class="btn btn-primary" href="{% url 'run_detail' generated_run.id %}">View generated roster</a>{% if generated_run.downloadable %}<a class="btn btn-outline-primary" href="{% url 'download_run' generated_run.id %}">Download Excel</a>{% endif %}</div></section>{% endfor %}
 {% else %}
 <section class="panel"><div class="panel-title"><div><h2>Automatic generation needs source data</h2><p>Review the import findings and correct the uploaded workbook layout or source month.</p></div><span class="status-tag status-review">NOT GENERATED</span></div>{% for warning in batch.warnings %}<p class="small text-secondary">{{ warning }}</p>{% endfor %}</section>
 {% endif %}

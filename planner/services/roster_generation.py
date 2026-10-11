@@ -474,7 +474,7 @@ def _validate_employee(row, target_month, assignments):
     return issues
 
 
-def create_roster_preview(workbook_import, target_month, selected_categories=None, public_holidays=None, staffing_requirements=None, history_complete=False, leave_by_employee=None):
+def create_roster_preview(workbook_import, target_month, selected_categories=None, public_holidays=None, staffing_requirements=None, history_complete=False, leave_by_employee=None, source_month=None):
     """Rotate shifts, apply supplied rules, and return a review draft."""
     target_month = date(target_month.year, target_month.month, 1)
     target_days = _month_days(target_month)
@@ -492,6 +492,8 @@ def create_roster_preview(workbook_import, target_month, selected_categories=Non
         excluded_from_roster=True,
     ).values_list("roster_sheet__name", "employee__normalized_name"))
     supported = [sheet for sheet in workbook_import.sheets.all() if sheet.layout_kind == "roster"]
+    if source_month:
+        supported = [sheet for sheet in supported if sheet.roster_month == source_month]
     if selected:
         supported = [sheet for sheet in supported if sheet.name in selected]
     if not supported:
@@ -502,65 +504,72 @@ def create_roster_preview(workbook_import, target_month, selected_categories=Non
     if not staffing_requirements:
         warnings.append({"severity": "warning", "code": "staffing_targets_unconfigured", "message": "No saved or inferable staffing targets apply to this location and month. Coverage targets are unavailable, so this roster remains provisional."})
 
+    grouped_sheets = defaultdict(list)
     for sheet in supported:
-        categories.append(sheet.name)
-        sheets_for_export.append({"name": sheet.name, "day_count": len(sheet.data_rows[0].get("day_columns", [])) if sheet.data_rows else 0})
-        source_month = sheet.roster_month
+        grouped_sheets[sheet.name].append(sheet)
+
+    for sheet_name, facility_sheets in grouped_sheets.items():
+        categories.append(sheet_name)
+        source_month = facility_sheets[0].roster_month
         if not source_month:
-            warnings.append({"severity": "warning", "code": "month_not_detected", "sheet": sheet.name, "message": f"Could not detect the source month for {sheet.name!r}; its rows were skipped."})
+            warnings.append({"severity": "warning", "code": "month_not_detected", "sheet": sheet_name, "message": f"Could not detect the source month for {sheet_name!r}; its rows were skipped."})
             continue
-        source_day_count = len(sheet.data_rows[0].get("day_columns", [])) if sheet.data_rows else 0
-        if target_days > source_day_count:
-            warnings.append({"severity": "warning", "code": "missing_day_columns", "sheet": sheet.name, "message": f"{sheet.name!r} has {source_day_count} day columns, fewer than the {target_days} target-month days. The additional days cannot be written safely without changing this sheet's layout."})
-        if source_month.month != target_month.month or source_month.year != target_month.year:
-            warnings.append({"severity": "info", "code": "weekday_projection", "sheet": sheet.name, "message": f"The {source_month:%B %Y} weekday patterns for {sheet.name!r} were projected to the target month and adjusted for available business rules."})
-
         planned_rows = []
-        for row in sheet.data_rows:
-            source_name = row.get("name", "")
-            name_key = " ".join(str(source_name).casefold().split())
-            profile = employee_profiles.get(name_key)
-            planned_leave = list(profile.planned_leave if profile else []) + list(leave_by_employee.get(name_key, []))
-            employee_name = profile.display_name if profile else source_name
-            is_active = profile.active if profile else True
-            is_removed = (sheet.name, name_key) in excluded_rows
-            previous_shift = _previous_shift(row)
-            previous_shifts = _previous_shifts(row)
-            plan_row = {
-                "sheet": sheet.name,
-                "employee": employee_name,
-                "employee_id": profile.pk if profile else None,
-                "employee_code": (profile.employee_code if profile and profile.employee_code else row.get("employee_code", "")),
-                "employee_id_column": row.get("employee_id_column"),
-                "previous_pattern": previous_shift,
-                "active": is_active,
-                "included": not is_removed and is_active,
-                "activity": row.get("category", ""),
-                "source_row": row.get("source_row"),
-                "assignments": row.get("assignments", {}),
-                "transport_preference": (profile.transport_preference if profile and profile.transport_preference else row.get("transport_preference", "")),
-                "source_assignments": row.get("assignments", {}),
-                "previous_shift": previous_shift,
-                "previous_shifts": sorted(previous_shifts),
-                "rotation_target": _rotated_shift(sheet.name, previous_shift, previous_shifts),
-                "profile": profile,
-                "planned_leave": planned_leave,
-                "excluded": is_removed or not is_active,
-                "removed": is_removed,
-                "source_month": source_month.isoformat(),
-            }
-            planned_rows.append(plan_row)
-            if is_removed:
-                warnings.append({"severity": "info", "code": "employee_removed", "sheet": sheet.name, "employee": employee_name, "message": f"{employee_name} was removed from this workbook's roster; no shifts were projected."})
-            elif not is_active:
-                warnings.append({"severity": "info", "code": "inactive_employee", "sheet": sheet.name, "employee": employee_name, "message": f"{employee_name} is inactive; no shifts were projected."})
-            if previous_shift and not is_removed and is_active:
-                warnings.append({"severity": "info", "code": "monthly_shift_rotation", "sheet": sheet.name, "employee": employee_name, "message": f"Previous primary shift {previous_shift}; this month's numbered assignments will use another shift."})
-                if not plan_row["rotation_target"]:
-                    warnings.append({"severity": "warning", "code": "rotation_requires_general", "sheet": sheet.name, "employee": employee_name, "message": f"{employee_name} worked every numbered shift in the source month; they will receive General or off rather than repeat one."})
+        for sheet in facility_sheets:
+            sheets_for_export.append({"name": sheet.name, "day_count": len(sheet.data_rows[0].get("day_columns", [])) if sheet.data_rows else 0})
+            source_day_count = len(sheet.data_rows[0].get("day_columns", [])) if sheet.data_rows else 0
+            if target_days > source_day_count:
+                warnings.append({"severity": "info", "code": "source_month_shorter", "sheet": sheet_name, "message": f"The target month has {target_days} days and the source has {source_day_count}; the exported roster will use a generated layout with all target dates."})
+        if source_month.month != target_month.month or source_month.year != target_month.year:
+            warnings.append({"severity": "info", "code": "weekday_projection", "sheet": sheet_name, "message": f"The {source_month:%B %Y} weekday patterns for {sheet_name!r} were projected to the target month and adjusted for available business rules."})
 
-        sheet_requirements = {key: value for key, value in staffing_requirements.items() if key[0] == sheet.name}
-        sheet_rows, sheet_warnings = _build_sheet_assignments(sheet.name, planned_rows, source_month, target_month, public_holidays, sheet_requirements)
+        for sheet in facility_sheets:
+            for row in sheet.data_rows:
+                source_name = row.get("name", "")
+                name_key = " ".join(str(source_name).casefold().split())
+                profile = employee_profiles.get(name_key)
+                planned_leave = list(profile.planned_leave if profile else []) + list(leave_by_employee.get(name_key, []))
+                employee_name = profile.display_name if profile else source_name
+                is_active = profile.active if profile else True
+                is_removed = (sheet.name, name_key) in excluded_rows
+                previous_shift = _previous_shift(row)
+                previous_shifts = _previous_shifts(row)
+                plan_row = {
+                    "sheet": sheet_name,
+                    "source_tab": row.get("source_tab", sheet.name),
+                    "employee": employee_name,
+                    "employee_id": profile.pk if profile else None,
+                    "employee_code": (profile.employee_code if profile and profile.employee_code else row.get("employee_code", "")),
+                    "employee_id_column": row.get("employee_id_column"),
+                    "previous_pattern": previous_shift,
+                    "active": is_active,
+                    "included": not is_removed and is_active,
+                    "activity": row.get("category", ""),
+                    "source_row": row.get("source_row"),
+                    "assignments": row.get("assignments", {}),
+                    "transport_preference": (profile.transport_preference if profile and profile.transport_preference else row.get("transport_preference", "")),
+                    "source_assignments": row.get("assignments", {}),
+                    "previous_shift": previous_shift,
+                    "previous_shifts": sorted(previous_shifts),
+                    "rotation_target": _rotated_shift(sheet_name, previous_shift, previous_shifts),
+                    "profile": profile,
+                    "planned_leave": planned_leave,
+                    "excluded": is_removed or not is_active,
+                    "removed": is_removed,
+                    "source_month": source_month.isoformat(),
+                }
+                planned_rows.append(plan_row)
+                if is_removed:
+                    warnings.append({"severity": "info", "code": "employee_removed", "sheet": sheet_name, "employee": employee_name, "message": f"{employee_name} was removed from this workbook's roster; no shifts were projected."})
+                elif not is_active:
+                    warnings.append({"severity": "info", "code": "inactive_employee", "sheet": sheet_name, "employee": employee_name, "message": f"{employee_name} is inactive; no shifts were projected."})
+                if previous_shift and not is_removed and is_active:
+                    warnings.append({"severity": "info", "code": "monthly_shift_rotation", "sheet": sheet_name, "employee": employee_name, "message": f"Previous primary shift {previous_shift}; this month's numbered assignments will use another shift."})
+                    if not plan_row["rotation_target"]:
+                        warnings.append({"severity": "warning", "code": "rotation_requires_general", "sheet": sheet_name, "employee": employee_name, "message": f"{employee_name} worked every numbered shift in the source month; they will receive General or off rather than repeat one."})
+
+        sheet_requirements = {key: value for key, value in staffing_requirements.items() if key[0] == sheet_name}
+        sheet_rows, sheet_warnings = _build_sheet_assignments(sheet_name, planned_rows, source_month, target_month, public_holidays, sheet_requirements)
         output_rows.extend(sheet_rows)
         warnings.extend(sheet_warnings)
         comparable_days = min(_month_days(source_month), target_days)
@@ -581,10 +590,10 @@ def create_roster_preview(workbook_import, target_month, selected_categories=Non
                 "message": f"Comparable employee-day assignments unchanged: {unchanged_pairs}/{comparable_pairs} ({round(100 * unchanged_pairs / comparable_pairs, 1)}%)."})
         for result_row in sheet_rows:
             warnings.extend(_validate_employee(result_row, target_month, result_row["assignments"]))
-            prior = next((item.get("previous_shifts", []) for item in planned_rows if item["source_row"] == result_row["source_row"]), [])
+            prior = next((item.get("previous_shifts", []) for item in planned_rows if item["source_row"] == result_row["source_row"] and item.get("source_tab") == result_row.get("source_tab")), [])
             repeated = [code for code in result_row["assignments"] if code == "3" and code in prior]
             if repeated:
-                warnings.append({"severity": "error", "code": "prior_month_night_repeated", "sheet": sheet.name, "employee": result_row["employee"], "message": f"{result_row['employee']} was assigned night shift despite working it in the source month."})
+                warnings.append({"severity": "error", "code": "prior_month_night_repeated", "sheet": sheet_name, "employee": result_row["employee"], "message": f"{result_row['employee']} was assigned night shift despite working it in the source month."})
 
     assignments_by_employee_day = defaultdict(list)
     for row in output_rows:
@@ -629,4 +638,4 @@ def create_roster_preview(workbook_import, target_month, selected_categories=Non
     if not any(sheet.name == "OB & CE" for sheet in supported):
         warnings.append({"severity": "info", "code": "attendance_not_projected", "message": "Attendance-only sheet 'OB & CE' is retained as a reference and is not projected as a shift roster."})
     warnings.append({"severity": "info", "code": "transport_soft_preference", "message": "Eligible own-vehicle employees are preferred when the scheduler fills a required shift; cab-dependent employees are used when needed."})
-    return output_rows, warnings, categories, sheets_for_export
+    return output_rows, warnings, list(dict.fromkeys(categories)), sheets_for_export

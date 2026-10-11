@@ -1,4 +1,5 @@
 import calendar
+from io import BytesIO
 import logging
 import re
 from datetime import date, timedelta
@@ -74,23 +75,19 @@ def signup_view(request):
 def dashboard(request):
     latest = WorkbookImport.objects.filter(uploaded_by=request.user).order_by("-uploaded_at").first()
     if latest and not latest.generation_runs.exists():
-        target_month, issue = _next_target_month(latest)
+        target_groups, issue = _next_target_month_groups(latest)
         if issue:
             messages.error(request, issue)
             return redirect("workbook_detail", workbook_id=latest.pk)
-        holidays = set(PublicHoliday.objects.filter(
-            confirmed=True, day__year=target_month.year, day__month=target_month.month,
-        ).values_list("day", flat=True))
-        try:
-            run = _generate_roster_for_batch(request, latest, target_month, public_holidays=holidays)
-        except Exception:
-            logger.exception("Automatic roster generation failed for existing import %s", latest.pk)
-            messages.error(request, "The workbook was uploaded, but automatic generation failed. The source roster is available to inspect; check the server error log for details.")
+        runs, failed_months = _generate_roster_groups(request, latest, target_groups)
+        if not runs:
+            messages.error(request, "Automatic generation failed. The uploaded source roster is available to inspect.")
             return redirect("workbook_detail", workbook_id=latest.pk)
-        if run:
-            messages.success(request, f"Automatically generated the {target_month:%B %Y} roster for all detected locations.")
-            return redirect("run_detail", run_id=run.pk)
-        return redirect("workbook_detail", workbook_id=latest.pk)
+        message = f"Automatically generated {len(runs)} next-month roster(s) from the source month groups."
+        if failed_months:
+            message += " Some month groups failed: " + ", ".join(failed_months) + "."
+        messages.success(request, message)
+        return redirect("run_detail", run_id=runs[-1].pk)
     return render(request, "planner/dashboard.html", _dashboard_context(request))
 
 
@@ -138,42 +135,75 @@ def upload_workbook(request):
     messages.success(request, f"Imported {batch.source_filename}: {len(parsed['sheet_summary'])} worksheets and {parsed['employee_count']} unique names detected.")
     for warning in parsed["warnings"][:5]:
         messages.warning(request, warning)
-    target_month, issue = _next_target_month(batch)
+    target_groups, issue = _next_target_month_groups(batch)
     if issue:
         messages.error(request, issue)
         return redirect("workbook_detail", workbook_id=batch.pk)
-    holidays = set(PublicHoliday.objects.filter(
-        confirmed=True, day__year=target_month.year, day__month=target_month.month,
-    ).values_list("day", flat=True))
-    try:
-        run = _generate_roster_for_batch(request, batch, target_month, public_holidays=holidays)
-    except Exception:
-        logger.exception("Automatic roster generation failed for import %s", batch.pk)
-        messages.error(request, "The workbook was uploaded, but automatic generation failed. The source roster is available to inspect; check the server error log for details.")
+    runs, failed_months = _generate_roster_groups(request, batch, target_groups)
+    if not runs:
+        messages.error(request, "Automatic generation failed. The uploaded source roster is available to inspect.")
         return redirect("workbook_detail", workbook_id=batch.pk)
-    if not run:
-        return redirect("workbook_detail", workbook_id=batch.pk)
-    messages.success(request, f"Automatically generated the {target_month:%B %Y} roster for all detected locations.")
-    return redirect("run_detail", run_id=run.pk)
+    message = f"Automatically generated {len(runs)} next-month roster(s) from the source month groups."
+    if failed_months:
+        message += " Some month groups failed: " + ", ".join(failed_months) + "."
+    messages.success(request, message)
+    return redirect("run_detail", run_id=runs[-1].pk)
+
+
+def _next_target_month_groups(batch):
+    sheets = list(batch.sheets.filter(layout_kind="roster"))
+    if not sheets:
+        return {}, "No employee roster tabs or location rows were detected in the uploaded workbook."
+    if any(not sheet.roster_month for sheet in sheets):
+        missing = ", ".join(sheet.name for sheet in sheets if not sheet.roster_month)
+        return {}, f"The source month could not be detected for {missing}; automatic month selection is unsafe."
+    groups = {}
+    for sheet in sheets:
+        source_month = date(sheet.roster_month.year, sheet.roster_month.month, 1)
+        target_month = date(source_month.year + (source_month.month == 12), 1 if source_month.month == 12 else source_month.month + 1, 1)
+        groups.setdefault(target_month, source_month)
+    return groups, None
 
 
 def _next_target_month(batch):
-    sheets = list(batch.sheets.filter(layout_kind="roster"))
-    if not sheets:
-        return None, "No employee roster tabs or location rows were detected in the uploaded workbook."
-    if any(not sheet.roster_month for sheet in sheets):
-        missing = ", ".join(sheet.name for sheet in sheets if not sheet.roster_month)
-        return None, f"The source month could not be detected for {missing}; automatic month selection is unsafe."
-    months = {date(sheet.roster_month.year, sheet.roster_month.month, 1) for sheet in sheets}
-    if len(months) != 1:
-        return None, "The uploaded location rosters contain different source months. Upload one workbook with a consistent previous month."
-    source_month = next(iter(months))
-    return date(source_month.year + (source_month.month == 12), 1 if source_month.month == 12 else source_month.month + 1, 1), None
+    """Compatibility helper for a single-month upload."""
+    groups, issue = _next_target_month_groups(batch)
+    if issue:
+        return None, issue
+    if len(groups) != 1:
+        return None, "This workbook contains multiple source months; generate one next-month roster for each month group."
+    return next(iter(groups)), None
 
 
-def _source_visualization_sheets(batch):
+def _generate_roster_groups(request, batch, target_groups):
+    runs, failed_months = [], []
+    with batch.source_file.open("rb") as source_file:
+        source_bytes = source_file.read()
+    for target_month, source_month in sorted(target_groups.items()):
+        holidays = set(PublicHoliday.objects.filter(
+            confirmed=True, day__year=target_month.year, day__month=target_month.month,
+        ).values_list("day", flat=True))
+        try:
+            run = _generate_roster_for_batch(
+                request, batch, target_month, public_holidays=holidays,
+                source_month=source_month,
+                source_bytes=source_bytes,
+            )
+        except Exception:
+            logger.exception("Automatic roster generation failed for import %s and target %s", batch.pk, target_month)
+            failed_months.append(target_month.strftime("%B %Y"))
+            continue
+        if run:
+            runs.append(run)
+    return runs, failed_months
+
+
+def _source_visualization_sheets(batch, source_month=None):
     visual_sheets = []
-    for sheet in batch.sheets.filter(layout_kind="roster"):
+    source_sheets = batch.sheets.filter(layout_kind="roster")
+    if source_month:
+        source_sheets = source_sheets.filter(roster_month=source_month)
+    for sheet in source_sheets:
         source_rows = sheet.data_rows
         day_count = max((len(row.get("assignments", {})) for row in source_rows), default=0)
         dates = []
@@ -256,6 +286,11 @@ def workbook_detail(request, workbook_id):
     saved_history = history_status(request.user, date(timezone.localdate().year, timezone.localdate().month, 1))
     base_file_sheet = _ensure_staffing_reference_data(batch)
     latest_run = batch.generation_runs.first()
+    generated_runs = list(batch.generation_runs.all())
+    for generated_run in generated_runs:
+        has_errors = any(item.get("severity") == "error" for item in generated_run.warnings)
+        has_structural_limitations = any(item.get("code") in {"month_not_detected", "missing_day_columns", "no_roster_sheets", "export_layout"} for item in generated_run.warnings)
+        generated_run.downloadable = generated_run.validation_status in {"VALID", "NEEDS_ATTENTION"} and not has_errors and not has_structural_limitations
     latest_downloadable = False
     if latest_run:
         latest_errors = any(item.get("severity") == "error" for item in latest_run.warnings)
@@ -266,6 +301,7 @@ def workbook_detail(request, workbook_id):
         "employees": employees,
         "source_roster_sheets": _source_visualization_sheets(batch),
         "latest_run": latest_run,
+        "generated_runs": generated_runs,
         "latest_downloadable": latest_downloadable,
         "staffing_form": StaffingConfigurationForm(owner=request.user, workbook_import=batch),
         "history_months": saved_history["months"],
@@ -392,8 +428,12 @@ def generate_roster(request):
     return redirect("workbook_detail", workbook_id=batch.pk)
 
 
-def _generate_roster_for_batch(request, batch, target_month, public_holidays=None):
-    categories = list(batch.sheets.filter(layout_kind="roster").values_list("name", flat=True).distinct())
+def _generate_roster_for_batch(request, batch, target_month, public_holidays=None, source_month=None, source_bytes=None):
+    source_queryset = batch.sheets.filter(layout_kind="roster")
+    if source_month:
+        source_queryset = source_queryset.filter(roster_month=source_month)
+    source_sheets_for_month = list(source_queryset)
+    categories = list(dict.fromkeys(sheet.name for sheet in source_sheets_for_month))
     saved_requirements = StaffingRequirement.objects.filter(owner=request.user, effective_from__lte=target_month).filter(Q(effective_to__isnull=True) | Q(effective_to__gte=target_month))
     requirements = {}
     for requirement in saved_requirements.order_by("effective_from"):
@@ -405,7 +445,10 @@ def _generate_roster_for_batch(request, batch, target_month, public_holidays=Non
     missing_targets = []
     inferred_requirements = set()
     target_facilities = categories
-    source_sheets = {sheet.name: sheet for sheet in batch.sheets.filter(layout_kind="roster", name__in=target_facilities)}
+    source_sheets = {}
+    for source_sheet in source_sheets_for_month:
+        if source_sheet.name in target_facilities:
+            source_sheets.setdefault(source_sheet.name, []).extend(source_sheet.data_rows)
     unsupported_locations = []
     for facility in target_facilities:
         if facility not in {"HDC3", "HDC4", "HDC5"}:
@@ -427,8 +470,8 @@ def _generate_roster_for_batch(request, batch, target_month, public_holidays=Non
                     inferred_requirements.add(key)
                     source_sheet = source_sheets.get(facility)
                     inferred = _inferred_coverage_target(
-                        source_sheet.data_rows if source_sheet else [],
-                        source_sheet.roster_month if source_sheet and source_sheet.roster_month else target_month,
+                        source_sheet if source_sheet else [],
+                        source_month or target_month,
                         sample,
                         shift,
                     )
@@ -455,7 +498,16 @@ def _generate_roster_for_batch(request, batch, target_month, public_holidays=Non
         staffing_requirements=requirements,
         history_complete=history["complete_for_target_year"],
         leave_by_employee=leave_by_employee,
+        source_month=source_month,
     )
+    inferred_source_months = [
+        item for item in batch.sheet_summary
+        if item.get("month_inferred") and item.get("month") == source_month.isoformat()
+    ] if source_month else []
+    for item in inferred_source_months:
+        warnings.append({"severity": "warning", "code": "source_month_inferred", "sheet": item["name"], "message": f"The {item['name']!r} month label disagreed with its day and weekday headers. The source period was inferred as {source_month:%B %Y}; verify the source tab before treating this roster as final."})
+    if any(item.get("layout_kind") == "staffing_reference" for item in batch.sheet_summary):
+        warnings.append({"severity": "warning", "code": "staffing_reference_unmapped", "message": "A staffing count table was found in the workbook, but its date and shift mapping is ambiguous. It was retained as reference data; provisional targets are inferred from actual assignments and are not confirmed."})
     for warning in warnings:
         if warning.get("code") != "staffing_shortage" or not warning.get("date"):
             continue
@@ -489,16 +541,20 @@ def _generate_roster_for_batch(request, batch, target_month, public_holidays=Non
             variance = f"short by {item['shortage']}" if item["shortage"] else f"over by {item['excess']}"
             warnings.append({"severity": "error", "code": issue_code, "sheet": item["facility"], "shift": item["shift"], "date": item["date"], "required": item["required"], "actual": item["actual"], "message": f"{item['facility']} shift {item['shift']} is {variance} on {item['date']}; {item['actual']} assigned against a target of {item['required']}."})
     hard_errors = [item for item in warnings if item.get("severity") == "error"]
-    unresolved = any(item.get("code") in {"staffing_targets_unconfigured", "annual_history_unavailable", "staffing_configuration_incomplete", "month_not_detected", "missing_day_columns", "location_rules_unavailable", "public_holiday_calendar_unavailable", "leave_data_unavailable", "leave_dates_unresolved"} for item in warnings)
+    unresolved = any(item.get("code") in {"staffing_targets_unconfigured", "annual_history_unavailable", "staffing_configuration_incomplete", "month_not_detected", "missing_day_columns", "location_rules_unavailable", "public_holiday_calendar_unavailable", "leave_data_unavailable", "leave_dates_unresolved", "source_month_inferred", "staffing_reference_unmapped", "source_marker_review"} for item in warnings)
     validation_status = "INFEASIBLE" if any(item.get("code") in {"coverage_gap", "staffing_shortage"} for item in hard_errors) else "INVALID" if hard_errors else "NEEDS_ATTENTION" if unresolved else "VALID"
     staffing_state = "MISMATCH" if any(item["shortage"] or item["excess"] for item in coverage) else "INFERRED" if missing_targets else "CONFIGURED"
     validation_report = {"rules": "INVALID" if hard_errors else "VALID", "staffing": staffing_state, "history": "COMPLETE" if history["complete_for_target_year"] else "INCOMPLETE", "feasibility": "INFEASIBLE" if validation_status == "INFEASIBLE" else "NOT_FEASIBLE" if validation_status == "INVALID" else "FEASIBLE", "overall": validation_status, "coverage": coverage, "history_months": [item.isoformat() for item in history["months"]], "baseline_effective_from": history["baseline"].effective_from.isoformat() if history["baseline"] else None}
     try:
-        if any(item.get("consolidated") for item in batch.sheet_summary):
+        needs_expanded_layout = any(item.get("day_count", 0) < _month_days(target_month) for item in export_sheets)
+        if any(item.get("consolidated") for item in batch.sheet_summary) or needs_expanded_layout:
             output, export_report = export_consolidated_workbook(assignments, target_month, validation_report, warnings)
         else:
-            with batch.source_file.open("rb") as source:
+            source = BytesIO(source_bytes) if source_bytes is not None else batch.source_file.open("rb")
+            try:
                 output, export_report = export_workbook(source, export_sheets, assignments, target_month, validation_report, warnings)
+            finally:
+                source.close()
         for message in export_report["layout_warnings"][:100]:
             warnings.append({"severity": "warning", "code": "export_layout", "message": message})
         run = GenerationRun.objects.create(source=batch, created_by=request.user, target_month=target_month, categories=used_categories, status="review", validation_status=validation_status, validation_report=validation_report, warnings=warnings, assignments=assignments)
@@ -539,10 +595,16 @@ def run_detail(request, run_id):
     errors = [item for item in run.warnings if item.get("severity") == "error"]
     structural_limitations = any(item.get("code") in {"month_not_detected", "missing_day_columns", "no_roster_sheets", "export_layout"} for item in run.warnings)
     downloadable = run.validation_status in {"VALID", "NEEDS_ATTENTION"} and not errors and not structural_limitations
+    other_runs = list(run.source.generation_runs.exclude(pk=run.pk).order_by("target_month"))
+    for other_run in other_runs:
+        other_errors = any(item.get("severity") == "error" for item in other_run.warnings)
+        other_structural = any(item.get("code") in {"month_not_detected", "missing_day_columns", "no_roster_sheets", "export_layout"} for item in other_run.warnings)
+        other_run.downloadable = other_run.validation_status in {"VALID", "NEEDS_ATTENTION"} and not other_errors and not other_structural
     assigned_count = sum(1 for row in run.assignments for code in row.get("assignments", []) if code in {"G", "1", "2", "3"})
     return render(request, "planner/run_detail.html", {
         "run": run, "employee_rows": run.assignments, "target_dates": target_dates,
-        "source_roster_sheets": _source_visualization_sheets(run.source),
+        "source_roster_sheets": _source_visualization_sheets(run.source, date(run.target_month.year - (run.target_month.month == 1), 12 if run.target_month.month == 1 else run.target_month.month - 1, 1)),
+        "other_runs": other_runs,
         "assigned_count": assigned_count, "uncovered_count": sum(1 for item in errors if item.get("code") in {"coverage_gap", "general_coverage_gap", "staffing_shortage"}),
         "blocking_errors": errors, "validation_report": run.validation_report,
         "downloadable": downloadable, "provisional_download": downloadable and run.validation_status == "NEEDS_ATTENTION",

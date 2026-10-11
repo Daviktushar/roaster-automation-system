@@ -94,7 +94,85 @@ def make_combined_location_team_workbook():
     return output.getvalue()
 
 
+def make_mixed_month_workbook():
+    book = Workbook()
+    hdc3 = book.active
+    hdc3.title = "HDC3"
+    hdc3["A1"] = "Oct'26"
+    hdc3["A2"] = "EMPLOYEE NAME"
+    hdc3["B2"] = "Activity"
+    for day in range(1, 32):
+        current = date(2026, 10, day)
+        hdc3.cell(1, day + 2, day)
+        hdc3.cell(2, day + 2, current.strftime("%a"))
+        hdc3.cell(3, day + 2, "WO" if current.weekday() >= 5 else "G")
+    hdc3["A3"] = "HDC3 Agent"
+    hdc3["B3"] = "CS"
+
+    hdc5 = book.create_sheet("HDC5")
+    hdc5["A1"] = "Sep'26"  # The tab's 31-day weekday grid proves it is October.
+    hdc5["A2"] = "EMPLOYEE NAME"
+    hdc5["B2"] = "Facility"
+    for day in range(1, 32):
+        current = date(2026, 10, day)
+        hdc5.cell(1, day + 2, day)
+        hdc5.cell(2, day + 2, current.strftime("%a"))
+        hdc5.cell(3, day + 2, "WO" if current.weekday() >= 5 else "G")
+    hdc5["A3"] = "HDC5 Agent"
+    hdc5["B3"] = "HDC5"
+
+    supplemental = book.create_sheet("DL & SL")
+    supplemental["A1"] = "Oct'26"
+    supplemental["A2"] = "EMPLOYEE NAME"
+    supplemental["B2"] = "Facility"
+    for day in range(1, 32):
+        current = date(2026, 10, day)
+        supplemental.cell(1, day + 2, day)
+        supplemental.cell(2, day + 2, current.strftime("%a"))
+        supplemental.cell(3, day + 2, "WO" if current.weekday() >= 5 else "G")
+    supplemental["A3"] = "HDC3 supplemental agent"
+    supplemental["B3"] = "HDC3"
+
+    dd = book.create_sheet("DD")
+    dd["A1"] = "Sep'26"
+    dd["A2"] = "EMPLOYEE NAME"
+    dd["B2"] = "Activity"
+    for day in range(1, 31):
+        current = date(2026, 9, day)
+        dd.cell(1, day + 2, day)
+        dd.cell(2, day + 2, current.strftime("%a"))
+        dd.cell(3, day + 2, "WO" if current.weekday() >= 5 else "G")
+    dd["A3"] = "DD Agent"
+    dd["B3"] = "META"
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+
 class WorkbookWorkflowTests(TestCase):
+    def test_mixed_source_months_generate_separate_next_month_rosters(self):
+        storage_settings = {
+            "default": {"BACKEND": "planner.tests.storage.MemoryStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with override_settings(STORAGES=storage_settings):
+            user = get_user_model().objects.create_user(username="mixed-months", password="Roster-Preview-482!")
+            self.client.force_login(user)
+            response = self.client.post("/workbooks/upload/", {
+                "workbook": SimpleUploadedFile("mixed.xlsx", make_mixed_month_workbook(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            })
+            self.assertEqual(response.status_code, 302)
+            source = WorkbookImport.objects.get()
+            runs = list(GenerationRun.objects.filter(source=source).order_by("target_month"))
+            self.assertEqual([run.target_month for run in runs], [date(2026, 10, 1), date(2026, 11, 1)])
+            self.assertEqual(set(runs[0].categories), {"DD"})
+            self.assertEqual(set(runs[1].categories), {"HDC3", "HDC5"})
+            self.assertEqual(sum(row["sheet"] == "HDC3" for row in runs[1].assignments), 2)
+            self.assertTrue(any(item["code"] == "source_month_inferred" for item in runs[1].warnings))
+            detail = self.client.get(reverse("workbook_detail", args=[source.pk]))
+            self.assertContains(detail, "October 2026")
+            self.assertContains(detail, "November 2026")
+
     def test_invalid_upload_shows_inline_error_and_keeps_dashboard(self):
         user = get_user_model().objects.create_user(username="invalid-upload", password="Roster-Preview-482!")
         self.client.force_login(user)

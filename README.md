@@ -21,7 +21,7 @@ A Windows-friendly roster workspace built in small, reviewable phases. The stand
 
 ## Run the working application (frontend and backend)
 
-The working frontend is served by Django, which also handles accounts, workbook uploads, roster generation, and downloads. From PowerShell in this folder, start the complete local setup with:
+The working frontend is served by Django, which also handles accounts, workbook uploads, roster generation, and downloads. Upload one previous-month workbook to start the flow. If its tabs contain different source months, the system creates one next-month output per source-month group. It checks day counts and weekday headers against month labels; a provable correction is called out in the results and keeps that roster provisional until verified. From PowerShell in this folder, start the complete local setup with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start_app.ps1

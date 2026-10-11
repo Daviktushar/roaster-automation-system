@@ -93,6 +93,35 @@ def _detect_month_and_day_columns(rows, epoch):
     return month, days, headers
 
 
+def _reconcile_month_with_weekdays(month, day_columns, weekday_headers):
+    """Correct a stale month label only when the full day grid proves another month."""
+    if not month or len(day_columns) < 28 or len(weekday_headers) != len(day_columns):
+        return month, False
+    weekday_numbers = {calendar.day_abbr[index].casefold(): index for index in range(7)}
+    observed = [weekday_numbers.get(str(value).strip()[:3].casefold()) for value in weekday_headers]
+    if any(value is None for value in observed):
+        return month, False
+    candidates = []
+    month_index = month.year * 12 + month.month - 1
+    for offset in range(-2, 3):
+        candidate_index = month_index + offset
+        year, zero_month = divmod(candidate_index, 12)
+        candidate_month = zero_month + 1
+        candidate = date(year, candidate_month, 1)
+        if calendar.monthrange(year, candidate_month)[1] != len(day_columns):
+            continue
+        if all(date(year, candidate_month, day).weekday() == weekday for day, weekday in enumerate(observed, start=1)):
+            candidates.append((abs(offset), candidate))
+    if not candidates:
+        return month, False
+    best_distance = min(distance for distance, _ in candidates)
+    best = {candidate for distance, candidate in candidates if distance == best_distance}
+    if len(best) != 1:
+        return month, False
+    inferred = next(iter(best))
+    return inferred, inferred != month
+
+
 def parse_workbook(uploaded_file):
     """Return bounded JSON-ready sheet data and validation warnings.
 
@@ -152,6 +181,7 @@ def parse_workbook(uploaded_file):
 
             values_rows = [record["values"] for record in rows]
             month, day_columns, weekday_headers = _detect_month_and_day_columns(values_rows, wb.epoch)
+            month, month_inferred = _reconcile_month_with_weekdays(month, day_columns, weekday_headers)
             first_row = values_rows[0] if values_rows else []
             header_row = values_rows[1] if len(values_rows) > 1 else []
             category_header = _text(header_row[1]) if len(header_row) > 1 else ""
@@ -178,6 +208,14 @@ def parse_workbook(uploaded_file):
                 if populated and len(populated) / max(1, sum(bool(_text(record["values"][0])) for record in rows[2:])) >= 0.8:
                     facility_col = 1
                     inferred_combined_location = True
+            # On a facility-named worksheet, a column called "Facility" often
+            # contains the service/team (for example Incidents or HDC4 Asset),
+            # not a second location dimension. Keep the worksheet location and
+            # use that column as the employee category.
+            if layout == "roster" and facility_col is not None and not inferred_combined_location and re.fullmatch(r"HDC\s*\d+", ws.title.strip(), re.IGNORECASE):
+                if activity_col is None or activity_col == facility_col:
+                    activity_col = facility_col
+                facility_col = None
             consolidated_groups = {}
             if layout == "roster" and facility_col is not None:
                 if employee_col is None or employee_col == facility_col:
@@ -210,6 +248,7 @@ def parse_workbook(uploaded_file):
                         transport_col = next((index for index, value in enumerate(normalized_headers) if value in {"own/cab", "transport", "transport preference"}), None)
                         row_data = {
                             "source_row": record["row_number"], "name": employee_name,
+                            "source_tab": ws.title,
                             "category": split_value[1] if split_value else _text(values[activity_col] if activity_col is not None and activity_col < len(values) else ""),
                             "category_header": _text(header_row[activity_col] if activity_col is not None and activity_col < len(header_row) else "Activity"),
                             "assignments": assignments,
@@ -258,6 +297,7 @@ def parse_workbook(uploaded_file):
                 identity_column = next((i for i, label in enumerate(header_row) if _text(label).casefold() in {"employee id", "emp id", "employee code", "emp code"}), None)
                 row_data = {
                     "source_row": row_index,
+                    "source_tab": ws.title,
                     "name": name_value,
                     "category": category,
                     "category_header": category_header,
@@ -277,6 +317,7 @@ def parse_workbook(uploaded_file):
                 "hidden": ws.sheet_state != "visible",
                 "layout_kind": layout,
                 "month": month.isoformat() if month else None,
+                "month_inferred": month_inferred,
                 "day_count": len(day_columns),
                 "employee_rows": sum(bool(item.get("name")) for item in sheet_rows),
                 "reference_rows": len(sheet_rows) if layout == "staffing_reference" else 0,
@@ -296,13 +337,31 @@ def parse_workbook(uploaded_file):
                     "reference_rows": 0, "header_fields": header_labels,
                     "consolidated": True, "source_sheet_name": ws.title,
                 }
+                matching_sheet = next((
+                    item for item in parsed_sheets
+                    if item["layout_kind"] == "roster"
+                    and item["name"] == facility
+                    and item.get("month") == facility_meta["month"]
+                ), None)
+                if matching_sheet:
+                    matching_sheet["rows"].extend(facility_rows)
+                    matching_sheet["employee_rows"] = len(matching_sheet["rows"])
+                    matching_sheet["consolidated"] = True
+                    for summary in summaries:
+                        if summary["layout_kind"] == "roster" and summary["name"] == facility and summary.get("month") == facility_meta["month"]:
+                            summary["employee_rows"] = matching_sheet["employee_rows"]
+                            summary["consolidated"] = True
+                            break
+                    continue
                 summaries.append(facility_meta)
                 parsed_sheets.append({**facility_meta, "rows": facility_rows, "weekdays": weekday_headers})
 
             if is_leave_sheet:
                 warnings.append("Leave details uses free-text date ranges and notes; review entries before using them as availability.")
+            if month_inferred:
+                warnings.append(f"{ws.title!r}: the month label did not match the complete weekday/day grid; source month was inferred as {month:%B %Y}.")
             if layout == "staffing_reference":
-                warnings.append("Base file contains activity/count tables; confirm which values are required staffing levels before enforcing them.")
+                warnings.append("Base file contains activity/count tables with no unambiguous date and shift mapping; automation will treat them as reference data and infer provisional targets from actual assignments.")
 
         distinct_months = sorted({value for value in months_by_sheet.values() if value})
         if len(distinct_months) > 1:

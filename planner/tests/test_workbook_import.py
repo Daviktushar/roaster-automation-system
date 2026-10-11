@@ -42,6 +42,25 @@ class WorkbookImportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_workbook(file)
 
+    def test_corrects_stale_month_label_when_day_count_and_all_weekdays_agree(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "HDC5"
+        sheet["A1"] = "Sep'26"
+        sheet["A2"] = "EMPLOYEE NAME"
+        for day in range(1, 32):
+            sheet.cell(1, day + 2, day)
+            sheet.cell(2, day + 2, date(2026, 10, day).strftime("%a"))
+        sheet["A3"] = "Demo employee"
+        sheet["B3"] = "HDC5"
+        source = NamedUpload()
+        workbook.save(source)
+        source.seek(0)
+
+        result = parse_workbook(source)
+        self.assertEqual(result["sheet_summary"][0]["month"], date(2026, 10, 1).isoformat())
+        self.assertTrue(result["sheet_summary"][0]["month_inferred"])
+
     def test_ambiguous_base_file_rows_are_retained_for_admin_confirmation(self):
         workbook = Workbook()
         sheet = workbook.active
@@ -112,6 +131,31 @@ class WorkbookImportTests(unittest.TestCase):
         single_result = parse_workbook(single_source)
         roster_tabs = [item for item in single_result["sheet_summary"] if item["layout_kind"] == "roster"]
         self.assertEqual([item["name"] for item in roster_tabs], ["HDC3"])
+
+    def test_facility_named_tabs_keep_facility_column_as_team_category(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "HDC3"
+        sheet["A1"] = "Oct'26"
+        sheet["B1"] = "HDC3"
+        sheet["A2"] = "EMPLOYEE NAME"
+        sheet["B2"] = "Facility"
+        for day in range(1, 32):
+            sheet.cell(1, day + 2, day)
+            sheet.cell(2, day + 2, date(2026, 10, day).strftime("%a"))
+        sheet["A3"] = "Alex"
+        sheet["B3"] = "Incidents"
+        sheet["A4"] = "Blair"
+        sheet["B4"] = "HDC3 Asset"
+        source = NamedUpload()
+        workbook.save(source)
+        source.seek(0)
+
+        result = parse_workbook(source)
+        rosters = [item for item in result["sheets"] if item["layout_kind"] == "roster"]
+        self.assertEqual(len(rosters), 1)
+        self.assertEqual(rosters[0]["name"], "HDC3")
+        self.assertEqual([row["category"] for row in rosters[0]["rows"]], ["Incidents", "HDC3 Asset"])
 
 
 if __name__ == "__main__":
