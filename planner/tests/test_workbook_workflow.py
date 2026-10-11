@@ -4,9 +4,10 @@ from io import BytesIO
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.urls import reverse
 from openpyxl import Workbook, load_workbook
 
-from planner.models import Employee, EmployeeAssignment, GenerationRun, WorkbookImport
+from planner.models import Employee, EmployeeAssignment, GenerationRun, PublicHoliday, WorkbookImport
 
 
 def make_reference_workbook():
@@ -59,6 +60,40 @@ def make_consolidated_workbook():
     return output.getvalue()
 
 
+def make_combined_location_team_workbook():
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Roster"
+    sheet["A1"] = "Oct'26"
+    sheet["A2"] = "EMPLOYEE NAME"
+    for day in range(1, 32):
+        current = date(2026, 10, day)
+        sheet.cell(1, day + 2, day)
+        sheet.cell(2, day + 2, current.strftime("%a"))
+    staff = [
+        (f"HDC3 Agent {index}", "HDC3- CS") for index in range(1, 9)
+    ] + [("HDC3 Asset", "HDC3- Asset"), ("HDC5 Agent 1", "HDC5- CS"), ("HDC5 Agent 2", "HDC5- CS")]
+    for row_number, (name, team) in enumerate(staff, start=3):
+        sheet.cell(row_number, 1, name)
+        sheet.cell(row_number, 2, team)
+        for day in range(1, 32):
+            current = date(2026, 10, day)
+            if current.month == 10 and current.day == 2:
+                code = "PH"
+            elif current.weekday() >= 5:
+                code = "WO" if "Asset" in team else ("3" if day % 4 == 3 else "2" if day % 4 == 0 else "WO")
+            elif "HDC3" in team and name.endswith("1"):
+                code = "3"
+            elif "HDC3" in team and name.endswith("2"):
+                code = "2"
+            else:
+                code = "G"
+            sheet.cell(row_number, day + 2, code)
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+
 class WorkbookWorkflowTests(TestCase):
     def test_invalid_upload_shows_inline_error_and_keeps_dashboard(self):
         user = get_user_model().objects.create_user(username="invalid-upload", password="Roster-Preview-482!")
@@ -76,7 +111,7 @@ class WorkbookWorkflowTests(TestCase):
         self.assertContains(response, "Excel could not read this workbook", status_code=400)
         self.assertEqual(WorkbookImport.objects.count(), 0)
 
-    def test_consolidated_upload_generates_selected_location_tab(self):
+    def test_consolidated_upload_generates_every_location_automatically(self):
         storage_settings = {
             "default": {"BACKEND": "planner.tests.storage.MemoryStorage"},
             "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
@@ -90,22 +125,68 @@ class WorkbookWorkflowTests(TestCase):
             self.assertEqual(response.status_code, 302)
             source = WorkbookImport.objects.get()
             self.assertEqual(set(source.sheets.filter(layout_kind="roster").values_list("name", flat=True)), {"HDC3", "HDC4"})
-            page = self.client.get(f"/workbooks/{source.pk}/")
-            self.assertContains(page, '<option value="HDC3"')
-            self.assertContains(page, '<option value="HDC4"')
-
-            response = self.client.post("/rosters/generate/", {
-                "source_id": source.pk, "location": "HDC3", "target_month": "11", "target_year": "2026",
-            })
-            self.assertEqual(response.status_code, 302)
             run = GenerationRun.objects.get(source=source)
-            self.assertEqual(run.categories, ["HDC3"])
+            self.assertEqual(set(run.categories), {"HDC3", "HDC4"})
+            self.assertEqual(run.target_month, date(2026, 11, 1))
+            page = self.client.get(f"/workbooks/{source.pk}/")
+            self.assertContains(page, "Previous-month schedule")
+            self.assertNotContains(page, 'id="id_location"')
             with run.output_file.open("rb") as generated:
                 output = load_workbook(generated, read_only=True, data_only=True)
                 self.assertIn("HDC3", output.sheetnames)
-                self.assertNotIn("HDC4", output.sheetnames)
+                self.assertIn("HDC4", output.sheetnames)
                 self.assertEqual(output["HDC3"]["A1"].value, "HDC3 roster · November 2026")
                 output.close()
+
+    def test_example_combined_facility_team_sheet_uploads_and_generates_all_locations(self):
+        storage_settings = {
+            "default": {"BACKEND": "planner.tests.storage.MemoryStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with override_settings(STORAGES=storage_settings):
+            user = get_user_model().objects.create_user(username="example-roster", password="Roster-Preview-482!")
+            self.client.force_login(user)
+            response = self.client.post("/workbooks/upload/", {
+                "workbook": SimpleUploadedFile("october_example.xlsx", make_combined_location_team_workbook(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            })
+            self.assertEqual(response.status_code, 302)
+            source = WorkbookImport.objects.get()
+            self.assertEqual(set(source.sheets.filter(layout_kind="roster").values_list("name", flat=True)), {"HDC3", "HDC5"})
+            run = GenerationRun.objects.get(source=source)
+            self.assertEqual(run.target_month, date(2026, 11, 1))
+            self.assertEqual(set(run.categories), {"HDC3", "HDC5"})
+            self.assertTrue(any(item["code"] == "public_holiday_calendar_unavailable" for item in run.warnings))
+            result_page = self.client.get(reverse("run_detail", args=[run.pk]))
+            self.assertContains(result_page, "Generated next-month roster")
+            self.assertContains(result_page, "Uploaded previous-month roster")
+            asset_row = next(row for row in run.assignments if row["employee"] == "HDC3 Asset")
+            self.assertTrue(all(code == "WO" for index, code in enumerate(asset_row["assignments"], start=1) if date(2026, 11, index).weekday() >= 5))
+
+    def test_upload_applies_exact_leave_notes_and_saved_holidays_automatically(self):
+        storage_settings = {
+            "default": {"BACKEND": "planner.tests.storage.MemoryStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with override_settings(STORAGES=storage_settings):
+            user = get_user_model().objects.create_user(username="leave-auto", password="Roster-Preview-482!")
+            self.client.force_login(user)
+            book = load_workbook(BytesIO(make_reference_workbook()))
+            leave_sheet = book.create_sheet("Leave Details")
+            leave_sheet["F1"] = "Leave Agent"
+            leave_sheet["G1"] = "2026-11-05 to 2026-11-06"
+            source_file = BytesIO()
+            book.save(source_file)
+            PublicHoliday.objects.create(day=date(2026, 11, 4), label="Saved calendar", confirmed=True)
+            response = self.client.post("/workbooks/upload/", {
+                "workbook": SimpleUploadedFile("with_leave.xlsx", source_file.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            })
+            self.assertEqual(response.status_code, 302)
+            imported = WorkbookImport.objects.get()
+            run = GenerationRun.objects.get(source=imported)
+            leave_row = next(row for row in run.assignments if row["employee"] == "Leave Agent")
+            self.assertTrue(all(code not in {"G", "1", "2", "3"} for code in leave_row["assignments"][3:8]))
+            self.assertFalse(any(item["code"] == "leave_data_unavailable" for item in run.warnings))
+            self.assertFalse(any(item["code"] == "public_holiday_calendar_unavailable" for item in run.warnings))
 
     def test_upload_project_and_download_a_separate_workbook(self):
         storage_settings = {
@@ -126,10 +207,9 @@ class WorkbookWorkflowTests(TestCase):
             employee = Employee.objects.get(display_name="Demo Agent")
             self.assertEqual(employee.owner, user)
             generation_page = self.client.get(f"/workbooks/{source.pk}/")
-            self.assertContains(generation_page, 'id="id_location"')
-            self.assertContains(generation_page, '<option value="HDC3"')
-            self.assertContains(generation_page, 'id="id_target_month"')
-            self.assertContains(generation_page, 'id="id_target_year"')
+            self.assertContains(generation_page, "Next-month roster generated automatically")
+            self.assertContains(generation_page, "Previous-month schedule")
+            self.assertNotContains(generation_page, 'id="id_location"')
 
             response = self.client.get(f"/workbooks/{source.pk}/employees/{employee.pk}/edit/")
             self.assertEqual(response.status_code, 200)
@@ -161,17 +241,17 @@ class WorkbookWorkflowTests(TestCase):
             response = self.client.post(f"/workbooks/{source.pk}/employees/{employee.pk}/roster/", {"action": "remove"})
             self.assertEqual(response.status_code, 302)
             self.assertTrue(EmployeeAssignment.objects.get(employee=employee).excluded_from_roster)
-            self.assertContains(self.client.get(f"/workbooks/{source.pk}/"), "Removed")
+            self.assertContains(self.client.get(f"/workbooks/{source.pk}/"), "Previous-month schedule")
 
+            PublicHoliday.objects.create(day=date(2026, 11, 4), label="Saved calendar", source=source, confirmed=True)
             response = self.client.post("/rosters/generate/", {
                 "source_id": str(source.pk),
                 "target_month": "11",
                 "target_year": "2026",
-                "public_holidays": "2026-11-04",
                 "location": "HDC3",
             })
             self.assertEqual(response.status_code, 302)
-            run = GenerationRun.objects.get()
+            run = GenerationRun.objects.filter(source=source).order_by("-created_at").first()
             self.assertEqual(run.target_month, date(2026, 11, 1))
             self.assertEqual(run.status, "review")
             self.assertEqual(run.assignments[0]["employee"], "Alex Doe")

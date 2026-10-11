@@ -64,6 +64,55 @@ class WorkbookImportTests(unittest.TestCase):
             {"column": "J", "value": "HDC4"},
         ])
 
+    def test_infers_hdc_locations_and_teams_from_combined_second_column(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Roster"
+        sheet["A1"] = "Oct'26"
+        sheet["A2"] = "EMPLOYEE NAME"
+        for day in range(1, 32):
+            sheet.cell(1, day + 2, day)
+            sheet.cell(2, day + 2, date(2026, 10, day).strftime("%a"))
+        for row_number, name, location_team in (
+            (3, "Alex", "HDC3- CS"),
+            (4, "Blair", "HDC3- Asset"),
+            (5, "Casey", "HDC5- CS"),
+            (6, "Drew", "HDC5 Asset"),
+        ):
+            sheet.cell(row_number, 1, name)
+            sheet.cell(row_number, 2, location_team)
+            for day in range(1, 32):
+                sheet.cell(row_number, day + 2, "WO" if date(2026, 10, day).weekday() >= 5 else "G")
+        source = NamedUpload()
+        workbook.save(source)
+        source.seek(0)
+
+        result = parse_workbook(source)
+        locations = {item["name"]: item for item in result["sheet_summary"] if item.get("consolidated")}
+        self.assertEqual(set(locations), {"HDC3", "HDC5"})
+        rows = {item["name"]: item["rows"] for item in result["sheets"] if item.get("consolidated")}
+        self.assertEqual(rows["HDC3"][0]["category"], "CS")
+        self.assertEqual(rows["HDC3"][1]["category"], "Asset")
+        self.assertEqual(rows["HDC5"][0]["category"], "CS")
+        self.assertEqual(rows["HDC5"][1]["category"], "Asset")
+
+        single_location = Workbook()
+        single_sheet = single_location.active
+        single_sheet.title = "HDC3"
+        single_sheet["A1"] = "Oct'26"
+        single_sheet["A2"] = "EMPLOYEE NAME"
+        for day in range(1, 32):
+            single_sheet.cell(1, day + 2, day)
+            single_sheet.cell(2, day + 2, date(2026, 10, day).strftime("%a"))
+        single_sheet["A3"] = "Alex"
+        single_sheet["B3"] = "HDC3- CS"
+        single_source = NamedUpload()
+        single_location.save(single_source)
+        single_source.seek(0)
+        single_result = parse_workbook(single_source)
+        roster_tabs = [item for item in single_result["sheet_summary"] if item["layout_kind"] == "roster"]
+        self.assertEqual([item["name"] for item in roster_tabs], ["HDC3"])
+
 
 if __name__ == "__main__":
     unittest.main()

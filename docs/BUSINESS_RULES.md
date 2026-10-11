@@ -2,10 +2,10 @@
 
 ## Configured through the application
 
-- Staffing targets are saved by facility, shift, weekday/weekend, and effective month. A target can also override one specific date. The staffing screen shows source `Base file` rows and column locations for an administrator to confirm. When an unspecified count is needed for a draft, the generator infers the median same-weekday count from the source roster and requires confirmation before approval.
+- Previously saved staffing targets are reused automatically. When an unspecified count is needed, the generator infers a median same-weekday count from the uploaded roster and labels it provisional; confirmation is not required to generate or download a warning-only result.
 - Historical imports retain monthly assignments, the source workbook/sheet, employee identity where available, derived monthly pattern, and transport preference. The history screen shows imported/approved months and gaps.
-- A separately audited baseline confirmation starts prospective pattern tracking. It never asserts earlier changes were zero. Pattern changes are recorded when a VALID roster is approved.
-- Generation reports rule compliance, staffing coverage, history completeness, feasibility, and overall status separately. Only `VALID` runs can be approved and downloaded. `NEEDS_ATTENTION`, `INFEASIBLE`, and `INVALID` runs remain review-only.
+- Historical completeness is reported. The annual pattern-change limit is checked when sufficient history exists; otherwise the result is provisional. The scheduler does not require a baseline confirmation before generating.
+- Generation reports rule compliance, staffing coverage, history completeness, feasibility, and overall status separately. Warning-only `NEEDS_ATTENTION` runs can be downloaded as provisional. Mandatory rule conflicts or unsafe workbook structure block download.
 
 ## Enforced scheduling rules
 
@@ -18,8 +18,8 @@
 
 ## Data boundaries
 
-- Planned leave is maintained on each employee profile, and target-month public holiday dates are entered in the generation form. The generator blocks leave dates and any intervening public holiday or weekend when leave is adjacent to it.
+- Exact future leave dates in an imported `Leave Details` tab and saved employee records are applied automatically. Confirmed public-holiday dates already in the project calendar are reused. The generator blocks leave dates and intervening public holidays/weekends when leave is adjacent; missing or unparseable dates are reported as limitations.
 - The source workbook has no employee ID in the inspected copy. Employee database IDs are stable internal identifiers; imported employee codes are preserved when a workbook supplies them.
 - Shift pattern is represented using the dominant numbered shift in the monthly assignment set, consistent with the project's existing primary-shift interpretation. The annual limit is checked only when a baseline and monthly history are sufficient for the target year.
-- The `Base file` values are displayed for administrator confirmation, not interpreted as staffing counts without an explicit mapping.
+- `Base file` values are not interpreted as staffing counts without an explicit mapping; the uploaded location roster is used to infer provisional counts instead.
 - The scheduler uses deterministic candidate ranking and hard-constraint checks; it does not prove global optimality. Any uncovered configured demand is surfaced as `INFEASIBLE` and is never silently approved.

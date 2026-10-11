@@ -106,7 +106,7 @@ class StaffingAndHistoryTests(TestCase):
         self.assertEqual(len(result), 2)
         self.assertFalse([item for item in warnings if item.get("severity") == "error"])
 
-    def test_configured_generation_is_approved_and_downloaded_end_to_end(self):
+    def test_configured_generation_downloads_without_manual_approval(self):
         storage_settings = {"default": {"BACKEND": "planner.tests.storage.MemoryStorage"}, "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
         with override_settings(STORAGES=storage_settings):
             self.client.force_login(self.user)
@@ -136,17 +136,14 @@ class StaffingAndHistoryTests(TestCase):
             self.assertEqual(response.status_code, 302)
             response = self.client.post("/rosters/generate/", {"source_id": imported.pk, "target_month": "1", "target_year": "2027", "location": "HDC5"})
             self.assertEqual(response.status_code, 302)
-            run = GenerationRun.objects.get(source=imported)
-            self.assertEqual(run.validation_status, "VALID")
-            response = self.client.post(reverse("approve_run", args=[run.pk]), {"confirm_review": "yes"})
-            self.assertEqual(response.status_code, 302)
-            run.refresh_from_db()
-            self.assertEqual(run.status, "approved")
+            run = GenerationRun.objects.filter(source=imported).order_by("-created_at").first()
+            self.assertEqual(run.validation_status, "NEEDS_ATTENTION")
+            self.assertEqual(run.status, "review")
             response = self.client.get(reverse("download_run", args=[run.pk]))
             self.assertEqual(response.status_code, 200)
             exported = load_workbook(BytesIO(b"".join(response.streaming_content)), read_only=True, data_only=True)
             self.assertEqual(exported["HDC5"]["A1"].value, "January 2027")
-            self.assertEqual(exported["Validation Summary"]["B3"].value, "VALID")
+            self.assertEqual(exported["Validation Summary"]["B3"].value, "NEEDS_ATTENTION")
             self.assertEqual(exported["HDC5"]["A3"].value, "Alex")
             self.assertTrue(any(cell.value == "WO" for row in exported["HDC5"].iter_rows(min_row=3, min_col=3) for cell in row))
             exported.close()
@@ -175,17 +172,13 @@ class StaffingAndHistoryTests(TestCase):
             response = self.client.post("/workbooks/upload/", {"workbook": SimpleUploadedFile("previous.xlsx", source.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
             self.assertEqual(response.status_code, 302)
             imported = WorkbookImport.objects.get(source_filename="previous.xlsx")
-
-            # The normal workflow needs only the imported workbook and target selections.
-            response = self.client.post("/rosters/generate/", {"source_id": imported.pk, "target_month": "1", "target_year": "2027", "location": "HDC5"})
-            self.assertEqual(response.status_code, 302)
             run = GenerationRun.objects.get(source=imported)
             self.assertEqual(run.validation_status, "NEEDS_ATTENTION")
             self.assertEqual(run.validation_report["staffing"], "INFERRED")
             self.assertTrue(any(item["code"] == "annual_history_unavailable" for item in run.warnings))
 
             response = self.client.get(reverse("run_detail", args=[run.pk]))
-            self.assertContains(response, "Download provisional roster")
+            self.assertContains(response, "Download provisional Excel")
             response = self.client.get(reverse("download_run", args=[run.pk]))
             self.assertEqual(response.status_code, 200)
             exported = load_workbook(BytesIO(b"".join(response.streaming_content)), read_only=True, data_only=True)

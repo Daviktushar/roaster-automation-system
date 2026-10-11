@@ -29,6 +29,6 @@ Inspected workbook: `Copy of HDC Oct'26 shift roster.xlsx` in `C:\Users\bhardwaj
 
 - Preserve exact sheet names and visibility. Do not normalize `DD ` to `DD`.
 - Store non-roster sheets as references; treat `Leave details` as raw review notes until dates can be confirmed.
-- Keep category labels without assuming each is a physical location. Column headers such as `Activity` or `Facility` inform whether a value is an activity.
+- Keep general category labels without assuming each is a physical location. An unlabeled second column with consistent values such as `HDC3- CS`, `HDC3- Asset`, or `HDC5 Asset` is recognized as a combined HDC location/team field; otherwise column headers such as `Activity` or `Facility` determine how values are interpreted.
 - Identify source month per sheet rather than assigning one month to the full workbook.
 - Do not enforce `Base file` counts until their scope and meaning are confirmed.

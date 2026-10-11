@@ -18,6 +18,7 @@ MAX_EMPTY_ROW_GAP = 75
 MAX_COLUMNS = 52
 MAX_EXPANDED_BYTES = 300 * 1024 * 1024
 NON_EMPLOYEE_ROWS = {"1st shift", "2nd shift", "3rd shift", "general shift", "total", "total shifts"}
+COMBINED_FACILITY_TEAM_RE = re.compile(r"^\s*(HDC\s*\d+)\s*(?:[-–]\s*|\s+)(.+?)\s*$", re.IGNORECASE)
 
 
 class WorkbookImportError(ValueError):
@@ -59,6 +60,15 @@ def _month_from(value, epoch):
 
 def _is_day_header(value, expected):
     return isinstance(value, (int, float)) and int(value) == expected
+
+
+def _split_facility_team(value):
+    """Split source values such as ``HDC3- CS`` into location and team."""
+    match = COMBINED_FACILITY_TEAM_RE.match(_text(value))
+    if not match:
+        return None
+    facility = re.sub(r"\s+", "", match.group(1)).upper()
+    return facility, match.group(2).strip()
 
 
 def _detect_month_and_day_columns(rows, epoch):
@@ -157,24 +167,41 @@ def parse_workbook(uploaded_file):
             facility_col = next((index for index, value in enumerate(normalized_headers) if value in {"facility", "location", "site", "center", "centre", "facility name", "location name"}), None)
             employee_col = next((index for index, value in enumerate(normalized_headers) if value in {"employee", "employee name", "resource", "resource name", "engineer", "engineer name", "name"}), None)
             activity_col = next((index for index, value in enumerate(normalized_headers) if value in {"activity", "team", "category", "department", "group"}), None)
+            inferred_combined_location = False
+            if layout == "roster" and facility_col is None and employee_col == 0 and len(header_row) > 1:
+                combined_values = [
+                    _split_facility_team(record["values"][1])
+                    for record in rows[2:]
+                    if len(record["values"]) > 1 and _text(record["values"][0])
+                ]
+                populated = [item for item in combined_values if item]
+                if populated and len(populated) / max(1, sum(bool(_text(record["values"][0])) for record in rows[2:])) >= 0.8:
+                    facility_col = 1
+                    inferred_combined_location = True
             consolidated_groups = {}
             if layout == "roster" and facility_col is not None:
                 if employee_col is None or employee_col == facility_col:
                     layout = "reference"
                     warnings.append(f"{ws.title!r}: a location column was found, but a separate Employee Name/Resource column is required for automatic roster generation.")
                 else:
-                    facility_values = {
-                        _text(record["values"][facility_col]).casefold()
-                        for record in rows[2:]
-                        if facility_col < len(record["values"]) and _text(record["values"][facility_col])
-                    }
+                    facility_values = set()
+                    for record in rows[2:]:
+                        if facility_col >= len(record["values"]):
+                            continue
+                        raw_value = _text(record["values"][facility_col])
+                        if not raw_value:
+                            continue
+                        split_value = _split_facility_team(raw_value) if inferred_combined_location else None
+                        facility_values.add((split_value[0] if split_value else raw_value).casefold())
                     is_single_location_tab = len(facility_values) == 1 and next(iter(facility_values)) == ws.title.strip().casefold()
                     if not is_single_location_tab:
                         layout = "consolidated_source"
                 if layout == "consolidated_source":
                     for record in rows[2:]:
                         values = record["values"]
-                        facility = _text(values[facility_col] if facility_col < len(values) else None)
+                        raw_facility = _text(values[facility_col] if facility_col < len(values) else None)
+                        split_value = _split_facility_team(raw_facility) if inferred_combined_location else None
+                        facility = split_value[0] if split_value else raw_facility
                         employee_name = _text(values[employee_col] if employee_col < len(values) else None)
                         if not facility or not employee_name or employee_name.casefold() in NON_EMPLOYEE_ROWS:
                             continue
@@ -183,7 +210,7 @@ def parse_workbook(uploaded_file):
                         transport_col = next((index for index, value in enumerate(normalized_headers) if value in {"own/cab", "transport", "transport preference"}), None)
                         row_data = {
                             "source_row": record["row_number"], "name": employee_name,
-                            "category": _text(values[activity_col] if activity_col is not None and activity_col < len(values) else None),
+                            "category": split_value[1] if split_value else _text(values[activity_col] if activity_col is not None and activity_col < len(values) else ""),
                             "category_header": _text(header_row[activity_col] if activity_col is not None and activity_col < len(header_row) else "Activity"),
                             "assignments": assignments,
                             "day_columns": [get_column_letter(i + 1) for i in day_columns],
