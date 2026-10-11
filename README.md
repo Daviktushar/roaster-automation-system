@@ -1,4 +1,6 @@
-# Monthly Roster Automation System
+# roaster-automation-system
+
+Web Based Roaster Automation System.
 
 A Windows-friendly roster workspace built in small, reviewable phases. The standalone frontend runs without Django. The Django app supports workbook import, inspection, draft generation, review, and separate Excel export.
 
