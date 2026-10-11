@@ -1,0 +1,7 @@
+{% extends 'planner/base.html' %}
+{% block title %}Pattern history baseline · Rosterly{% endblock %}
+{% block crumb %}Pattern history baseline{% endblock %}
+{% block content %}
+<div class="page-heading"><div><div class="eyebrow">AUDITED HISTORY SETUP</div><h1>Start prospective pattern tracking</h1><p>Confirm when verified shift-pattern history begins.</p></div><a class="btn btn-outline-secondary" href="{% url 'workbook_detail' batch.id %}">Back to workbook</a></div>
+<section class="panel" data-tour-page="baseline" data-tour="confirm"><p>This confirmation does not create earlier history or assert that prior pattern changes were zero. The date and note are retained with your account. Imported monthly workbooks remain available as separate historical evidence.</p><form method="post">{% csrf_token %}{% for field in form %}<div class="form-row"><label class="field-label" for="{{ field.id_for_label }}">{{ field.label|upper }}</label>{{ field }}<small class="field-help">{{ field.help_text }}</small>{{ field.errors }}</div>{% endfor %}<button class="btn btn-primary" type="submit">Record baseline confirmation</button></form></section>
+{% endblock %}

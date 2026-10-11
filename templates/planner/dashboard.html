@@ -1,0 +1,38 @@
+{% extends 'planner/base.html' %}
+{% block title %}Overview · Rosterly{% endblock %}
+{% block content %}
+<section class="view-pane">
+  <div class="page-heading"><div><div class="eyebrow">MONTHLY ROSTER WORKSPACE</div><h1>Welcome, {{ request.user.first_name|default:request.user.username }}</h1><p>Import a previous roster, review employee details, select a target period, and prepare a draft.</p></div><a class="btn btn-dark btn-generate" href="#start">＋ New roster</a></div>
+  <div class="preview-banner"><span class="banner-icon">i</span><span><strong>Draft workflow</strong> · Generated assignments require review and approval. The original workbook remains unchanged.</span></div>
+  <div class="stat-grid">
+    <article class="stat-card"><div class="stat-top"><span>IMPORTED WORKBOOKS</span></div><strong>{{ imports|length }}</strong><small>most recent imports shown below</small></article>
+    <article class="stat-card"><div class="stat-top"><span>ROSTER TABS</span></div><strong>{% if latest %}{{ latest.sheet_summary|length }}{% else %}0{% endif %}</strong><small>worksheets in latest workbook</small></article>
+    <article class="stat-card"><div class="stat-top"><span>DRAFT RUNS</span></div><strong>{{ runs|length }}</strong><small>review before approval</small></article>
+    <article class="stat-card"><div class="stat-top"><span>LATEST WORKBOOK</span></div><strong class="stat-file">{% if latest %}{{ latest.source_filename|truncatechars:26 }}{% else %}None uploaded{% endif %}</strong><small>{% if latest %}{{ latest.uploaded_at|date:'d M Y, H:i' }}{% else %}Upload an .xlsx workbook to start{% endif %}</small></article>
+  </div>
+  <div class="section-grid" id="start" data-tour-page="dashboard">
+    <section class="panel create-panel" data-tour="upload"><div class="panel-title"><div><h2>Import a previous roster</h2><p>Upload one Excel workbook containing the previous month’s data for all locations.</p></div><span class="step-label">STEP 1 · IMPORT</span></div><form method="post" action="{% url 'upload_workbook' %}" enctype="multipart/form-data">{% csrf_token %}<div class="upload-box"><input type="file" name="workbook" id="workbook" accept=".xlsx,.xlsm" required><div><strong>Choose previous month's workbook</strong><span>Location tabs, or one table with Location, Employee Name, and numbered day columns · maximum 20 MB</span></div></div>{% if upload_form.workbook.errors %}<div class="text-danger small mb-2">{{ upload_form.workbook.errors|striptags }}</div>{% endif %}<button class="btn btn-primary" type="submit">Inspect workbook <span>→</span></button></form></section>
+    {% if latest %}<section class="panel"><div class="panel-title"><div><h2>Generate next roster</h2><p>Using {{ latest.source_filename|truncatechars:40 }}. Select a location and target period.</p></div><span class="step-label" id="target-label">TARGET {{ generation_form.next_month_label }}</span></div><form method="post" action="{% url 'generate_roster' %}">{% csrf_token %}{{ generation_form.source_id }}<div class="form-row"><label class="field-label" for="id_location">LOCATION</label>{{ generation_form.location }}{% if generation_form.location.errors %}<div class="text-danger small">{{ generation_form.location.errors|striptags }}</div>{% endif %}</div>{% include 'planner/_target_period_fields.html' %}<div class="form-row"><label class="field-label" for="id_public_holidays">TARGET-MONTH PUBLIC HOLIDAYS</label>{{ generation_form.public_holidays }}<small class="field-help">Enter confirmed dates as YYYY-MM-DD, one per line.</small></div><button class="btn btn-primary" type="submit">Generate roster draft <span>→</span></button></form></section>{% endif %}
+  </div>
+  <div class="section-grid lower-grid">
+    <section class="panel"><div class="panel-title"><div><h2>Recent imports</h2><p>Workbooks uploaded to this account.</p></div></div><div class="table-wrap"><table class="table roster-table"><thead><tr><th>WORKBOOK</th><th>UPLOADED</th><th>STATUS</th><th></th></tr></thead><tbody>{% for item in imports %}<tr><td><span class="table-main">{{ item.source_filename|truncatechars:36 }}</span><small>{{ item.sheet_summary|length }} worksheet tabs</small></td><td>{{ item.uploaded_at|date:'d M Y' }}</td><td><span class="status-tag {% if item.status == 'ready' %}status-ready{% else %}status-review{% endif %}">{{ item.get_status_display }}</span></td><td><a class="row-action" href="{% url 'workbook_detail' item.id %}">Open</a></td></tr>{% empty %}<tr><td colspan="4" class="text-center text-secondary py-4">No workbook imported yet.</td></tr>{% endfor %}</tbody></table></div></section>
+    <section class="panel"><div class="panel-title"><div><h2>Recent roster drafts</h2><p>Target period and review status.</p></div></div>{% for run in runs %}<div class="history-item"><div><strong><a href="{% url 'run_detail' run.id %}">{{ run.target_month|date:'F Y' }} draft</a></strong><small>{{ run.categories|join:', ' }} · {{ run.get_status_display }}</small></div></div>{% empty %}<div class="empty-history"><strong>No drafts yet</strong><small>Import a previous roster, then create a draft.</small></div>{% endfor %}</section>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}<script>
+  document.querySelectorAll('form[action="/rosters/generate/"]').forEach(form => form.addEventListener('submit', () => { const button = form.querySelector('button[type="submit"]'); if (button) { button.disabled = true; button.textContent = 'Generating and validating…'; } }));
+  document.getElementById('use-next-month')?.addEventListener('click', function () {
+    document.getElementById('id_target_month').value = this.dataset.nextMonth;
+    document.getElementById('id_target_year').value = this.dataset.nextYear;
+  });
+  document.getElementById('id_location')?.addEventListener('change', function () {
+    const period = JSON.parse(this.dataset.periods || '{}')[this.value];
+    if (!period) return;
+    document.getElementById('id_target_month').value = period.month;
+    document.getElementById('id_target_year').value = period.year;
+    const button = document.getElementById('use-next-month');
+    if (button) { button.dataset.nextMonth = period.month; button.dataset.nextYear = period.year; button.textContent = `Use next month (${period.label})`; }
+    document.getElementById('target-label')?.replaceChildren(`TARGET ${period.label}`);
+  });
+</script>{% endblock %}

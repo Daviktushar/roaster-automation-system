@@ -1,0 +1,48 @@
+{% extends 'planner/base.html' %}
+{% block title %}Workbook details · Rosterly{% endblock %}
+{% block crumb %}Workbook inspection{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><div class="eyebrow">WORKBOOK IMPORT / INSPECTION</div><h1>{{ batch.source_filename|truncatechars:42 }}</h1><p>Uploaded {{ batch.uploaded_at|date:'d M Y, H:i' }} · {{ batch.sheet_summary|length }} worksheet tabs</p></div>
+  <a class="btn btn-outline-secondary" href="{% url 'dashboard' %}">← Dashboard</a>
+</div>
+<div class="preview-banner"><span class="banner-icon">i</span><span><strong>Source preserved</strong> · Generation exports to a separate workbook file.</span></div>
+<section class="panel" data-tour-page="workbook" data-tour="employees">
+  <div class="panel-title"><div><h2>Step 1 · Review employees</h2><p>Update employee details now; inactive employees receive no projected shifts.</p></div><span class="mode-pill">{{ employees|length }} PEOPLE</span></div>
+  <div class="table-wrap"><table class="table roster-table"><thead><tr><th>EMPLOYEE</th><th>EMAIL</th><th>PHONE</th><th>STATUS</th><th></th></tr></thead><tbody>
+    {% for employee in employees %}<tr><td><span class="table-main">{{ employee.display_name }}</span></td><td>{{ employee.email|default:'—' }}</td><td>{{ employee.phone|default:'—' }}</td><td><span class="status-tag {% if employee.removed_from_roster or not employee.active %}status-review{% else %}status-ready{% endif %}">{% if employee.removed_from_roster %}Removed{% elif employee.active %}Active{% else %}Inactive{% endif %}</span></td><td class="d-flex gap-2 align-items-center"><a class="row-action" href="{% url 'edit_employee' batch.id employee.id %}">Edit</a><form method="post" action="{% url 'toggle_employee_roster' batch.id employee.id %}" onsubmit="return confirm('{% if employee.removed_from_roster %}Restore this employee to future roster drafts?{% else %}Remove this employee from future roster drafts?{% endif %}')">{% csrf_token %}<input type="hidden" name="action" value="{% if employee.removed_from_roster %}restore{% else %}remove{% endif %}"><button class="btn btn-sm {% if employee.removed_from_roster %}btn-outline-primary{% else %}btn-outline-danger{% endif %}" type="submit">{% if employee.removed_from_roster %}Restore{% else %}Remove{% endif %}</button></form></td></tr>
+    {% empty %}<tr><td colspan="5" class="text-center text-secondary py-4">No employee rows were detected in roster tabs.</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="fine-print">Name changes are applied to your imported roster data and future exports. Contact details and notes are saved to your private workspace profile.</p>
+</section>
+<div class="section-grid">
+  <section class="panel" data-tour="generate">
+    <div class="panel-title"><div><h2>Step 2 · Generate a review draft</h2><p>Projects a similar weekday pattern and flags leave, holiday, and rule conflicts.</p></div><span class="step-label" id="target-label">TARGET {{ generation_form.next_month_label }}</span></div>
+    <form method="post" action="{% url 'generate_roster' %}">{% csrf_token %}{{ generation_form.source_id }}
+      {% include 'planner/_target_period_fields.html' %}
+      <div class="form-row"><label class="field-label" for="id_location">LOCATION</label>{{ generation_form.location }}{% if generation_form.location.errors %}<div class="text-danger small">{{ generation_form.location.errors|striptags }}</div>{% endif %}</div>
+      {{ generation_form.public_holidays.as_hidden }}
+      <button class="btn btn-primary" type="submit">Generate Roster <span>→</span></button>
+      <p class="fine-print">Staffing targets are reused from saved settings or inferred from this workbook. Inferred targets and incomplete history are clearly marked provisional.</p>
+    </form>
+  </section>
+  <section class="panel"><div class="panel-title"><div><h2>Import findings</h2><p>Check source layout before using it.</p></div><span class="status-tag {% if batch.status == 'ready' %}status-ready{% else %}status-review{% endif %}">{{ batch.get_status_display }}</span></div>{% for warning in batch.warnings %}<div class="warning-list"><li><span class="warning-symbol">!</span><div><strong>Workbook note</strong><small>{{ warning }}</small></div></li></div>{% empty %}<p class="text-secondary small">No structural warnings were detected.</p>{% endfor %}</section>
+</div>
+<section class="panel"><div class="panel-title"><div><h2>Worksheets</h2><p>Names are kept exactly, including hidden state and trailing whitespace.</p></div></div><div class="table-wrap"><table class="table roster-table"><thead><tr><th>WORKSHEET NAME</th><th>LAYOUT</th><th>MONTH</th><th>EMPLOYEE ROWS</th><th>STATE</th></tr></thead><tbody>{% for sheet in batch.sheet_summary %}<tr><td><span class="table-main">{% if sheet.name == 'DD ' %}DD <small>(trailing space)</small>{% else %}{{ sheet.name }}{% endif %}</span></td><td>{{ sheet.layout_kind|title }}</td><td>{% if sheet.month %}{{ sheet.month }}{% else %}—{% endif %}</td><td>{{ sheet.employee_rows }}</td><td>{% if sheet.hidden %}Hidden{% else %}Visible{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}
+{% block scripts %}<script>
+  document.querySelectorAll('form[action="/rosters/generate/"]').forEach(form => form.addEventListener('submit', () => { const button = form.querySelector('button[type="submit"]'); if (button) { button.disabled = true; button.textContent = 'Generating and validating…'; } }));
+  document.getElementById('use-next-month')?.addEventListener('click', function () {
+    document.getElementById('id_target_month').value = this.dataset.nextMonth;
+    document.getElementById('id_target_year').value = this.dataset.nextYear;
+  });
+  document.getElementById('id_location')?.addEventListener('change', function () {
+    const period = JSON.parse(this.dataset.periods || '{}')[this.value];
+    if (!period) return;
+    document.getElementById('id_target_month').value = period.month;
+    document.getElementById('id_target_year').value = period.year;
+    const button = document.getElementById('use-next-month');
+    if (button) { button.dataset.nextMonth = period.month; button.dataset.nextYear = period.year; button.textContent = `Use next month (${period.label})`; }
+    document.getElementById('target-label')?.replaceChildren(`TARGET ${period.label}`);
+  });
+</script>{% endblock %}

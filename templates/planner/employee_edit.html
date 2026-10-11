@@ -1,0 +1,17 @@
+{% extends 'planner/base.html' %}
+{% block title %}Edit employee · Rosterly{% endblock %}
+{% block crumb %}Employee details{% endblock %}
+{% block content %}
+<div class="page-heading"><div><div class="eyebrow">EMPLOYEE / PROFILE</div><h1>Edit {{ employee.display_name }}</h1><p>Review these details before generating the next roster draft.</p></div><a class="btn btn-outline-secondary" href="{% url 'workbook_detail' batch.id %}">← Back to workbook</a></div>
+<section class="panel" style="max-width:760px">
+  <div class="preview-banner"><span class="banner-icon">i</span><span><strong>Roster effect:</strong> name changes are written into future exported workbooks. Planned leave dates block assignments, including adjacent public holidays/weekends. Marking an employee inactive clears their projected shifts. Email, phone, and notes do not change shift rules.</span></div>
+  <form method="post">{% csrf_token %}
+    {% for field in form %}
+      {% if field.name == 'active' %}<div class="form-check mb-3">{{ field }}<label class="form-check-label" for="{{ field.id_for_label }}">Active employee</label>{% for error in field.errors %}<div class="text-danger small">{{ error }}</div>{% endfor %}</div>
+      {% else %}<div class="form-row"><label class="field-label" for="{{ field.id_for_label }}">{{ field.label|upper }}</label>{{ field }}{% if field.help_text %}<small class="field-help">{{ field.help_text }}</small>{% endif %}{% for error in field.errors %}<div class="text-danger small">{{ error }}</div>{% endfor %}</div>{% endif %}
+    {% endfor %}
+    <button class="btn btn-primary" type="submit">Save employee details</button>
+    <a class="btn btn-outline-secondary ms-2" href="{% url 'workbook_detail' batch.id %}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

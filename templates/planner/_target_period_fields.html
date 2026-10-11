@@ -1,0 +1,9 @@
+<div class="form-row">
+  <span class="field-label">ROSTER MONTH &amp; YEAR</span>
+  <div class="d-flex flex-wrap gap-2">
+    <div class="flex-grow-1"><label class="visually-hidden" for="id_target_month">Month</label>{{ generation_form.target_month }}</div>
+    <div class="flex-grow-1"><label class="visually-hidden" for="id_target_year">Year</label>{{ generation_form.target_year }}</div>
+  </div>
+  {% if generation_form.target_month.errors or generation_form.target_year.errors %}<div class="text-danger small">{{ generation_form.target_month.errors|striptags }} {{ generation_form.target_year.errors|striptags }}</div>{% endif %}
+  <div class="d-flex flex-wrap gap-2 align-items-center mt-2"><button class="btn btn-outline-primary btn-sm" id="use-next-month" type="button" data-next-month="{{ generation_form.next_month_value.month }}" data-next-year="{{ generation_form.next_month_value.year }}">Use next month ({{ generation_form.next_month_label }})</button><span class="field-help">The selected full month and year will appear at the top of the downloaded roster.</span></div>
+</div>

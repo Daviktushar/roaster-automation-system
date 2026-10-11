@@ -1,0 +1,14 @@
+{% extends 'planner/base.html' %}
+{% block title %}Staffing requirements · Rosterly{% endblock %}
+{% block crumb %}Staffing requirements{% endblock %}
+{% block content %}
+<div class="page-heading"><div><div class="eyebrow">ONE-TIME SETUP / REUSED MONTHLY</div><h1>Staffing requirements</h1><p>Confirm required headcounts by facility, shift, and day type.</p></div><a class="btn btn-outline-secondary" href="{% url 'workbook_detail' batch.id %}">Back to workbook</a></div>
+<section class="panel" data-tour-page="staffing" data-tour="source"><div class="panel-title"><div><h2>Source workbook reference</h2><p>Values below are displayed as imported. Ambiguous cells are not treated as confirmed targets.</p></div></div>
+{% if base_file_sheet %}<div class="table-wrap"><table class="table roster-table"><thead><tr><th>SOURCE ROW</th><th>NONEMPTY CELLS (COLUMN: VALUE)</th></tr></thead><tbody>{% for row in base_file_sheet.data_rows %}<tr><td>{{ row.source_row }}</td><td>{% for cell in row.cells %}<code>{{ cell.column }}: {{ cell.value }}</code>{% if not forloop.last %} · {% endif %}{% endfor %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>No “Base file” staffing reference tab was found in this workbook.</p>{% endif %}</section>
+<section class="panel" data-tour="targets"><div class="panel-title"><div><h2>Confirmed staffing targets</h2><p>Targets apply to future generations from the effective month. Previously saved targets are prefilled.</p></div></div>
+<form method="post">{% csrf_token %}{% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+<div class="form-row"><label class="field-label" for="id_effective_month">EFFECTIVE MONTH</label>{{ form.effective_month }}{{ form.effective_month.errors }}</div>
+<div class="form-row"><label class="field-label" for="id_requirements">STAFFING TARGETS</label>{{ form.requirements }}<small class="field-help">{{ form.requirements.help_text }}</small>{{ form.requirements.errors }}</div>
+<div class="form-row"><label class="field-label" for="id_confirmation_note">CONFIRMATION SOURCE</label>{{ form.confirmation_note }}<small class="field-help">For example: confirmed by roster owner on review of Base file rows 2–6.</small>{{ form.confirmation_note.errors }}</div>
+<button class="btn btn-primary" type="submit">Save staffing requirements</button></form></section>
+{% endblock %}
